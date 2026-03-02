@@ -594,6 +594,18 @@ fn setup_logging() -> anyhow::Result<()> {
 fn install_panic_hook() {
   let default_hook = panic::take_hook();
   panic::set_hook(Box::new(move |info| {
+    let is_portaudio_panic = info
+      .location()
+      .map(|location| location.file().contains("audio_backend/portaudio.rs"))
+      .unwrap_or(false);
+
+    if is_portaudio_panic {
+      eprintln!(
+        "Recoverable audio backend panic detected. Playback may pause while the output device changes."
+      );
+      return;
+    }
+
     ratatui::restore();
     let panic_log_path = dirs::home_dir().map(|home| {
       home

@@ -21,24 +21,118 @@ use librespot_playback::{
   mixer::{softmixer::SoftMixer, Mixer, MixerConfig},
   player::{Player, PlayerEventChannel},
 };
-use log::info;
+use log::{error, info, warn};
+use std::any::Any;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::time::{timeout, Duration};
 
-#[derive(Default)]
-struct NullSink;
+struct RecoveringSink {
+  inner: Option<Box<dyn audio_backend::Sink>>,
+  make_sink: Box<dyn Fn() -> Box<dyn audio_backend::Sink>>,
+}
 
-impl audio_backend::Open for NullSink {
-  fn open(_: Option<String>, _: AudioFormat) -> Self {
-    Self
+impl RecoveringSink {
+  fn new<F>(make_sink: F) -> Self
+  where
+    F: Fn() -> Box<dyn audio_backend::Sink> + 'static,
+  {
+    Self {
+      inner: None,
+      make_sink: Box::new(make_sink),
+    }
+  }
+
+  fn payload_to_string(payload: Box<dyn Any + Send>) -> String {
+    match payload.downcast::<String>() {
+      Ok(s) => *s,
+      Err(payload) => match payload.downcast::<&'static str>() {
+        Ok(s) => s.to_string(),
+        Err(_) => "unknown panic payload".to_string(),
+      },
+    }
+  }
+
+  fn panic_to_sink_error(
+    context: &'static str,
+    payload: Box<dyn Any + Send>,
+  ) -> audio_backend::SinkError {
+    let msg = Self::payload_to_string(payload);
+    audio_backend::SinkError::StateChange(format!("Audio backend panic in {context}: {msg}"))
+  }
+
+  fn create_sink(&mut self) -> audio_backend::SinkResult<()> {
+    if self.inner.is_some() {
+      return Ok(());
+    }
+
+    let make_sink = &self.make_sink;
+    match catch_unwind(AssertUnwindSafe(|| make_sink())) {
+      Ok(sink) => {
+        self.inner = Some(sink);
+        Ok(())
+      }
+      Err(payload) => {
+        let err = Self::panic_to_sink_error("open", payload);
+        error!("{err}");
+        Err(err)
+      }
+    }
+  }
+
+  fn with_inner<T, F>(&mut self, context: &'static str, op: F) -> audio_backend::SinkResult<T>
+  where
+    F: FnOnce(&mut dyn audio_backend::Sink) -> audio_backend::SinkResult<T>,
+  {
+    self.create_sink()?;
+
+    let Some(sink) = self.inner.as_mut() else {
+      return Err(audio_backend::SinkError::NotConnected(
+        "Audio sink unavailable".to_string(),
+      ));
+    };
+
+    match catch_unwind(AssertUnwindSafe(|| op(sink.as_mut()))) {
+      Ok(Ok(value)) => Ok(value),
+      Ok(Err(err)) => {
+        warn!("Audio backend {context} error: {err}");
+        self.inner = None;
+        Err(err)
+      }
+      Err(payload) => {
+        let err = Self::panic_to_sink_error(context, payload);
+        error!("{err}");
+        self.inner = None;
+        Err(err)
+      }
+    }
   }
 }
 
-impl audio_backend::Sink for NullSink {
-  fn write(&mut self, _: AudioPacket, _: &mut Converter) -> audio_backend::SinkResult<()> {
+impl audio_backend::Sink for RecoveringSink {
+  fn start(&mut self) -> audio_backend::SinkResult<()> {
+    self.with_inner("start", |sink| sink.start())
+  }
+
+  fn stop(&mut self) -> audio_backend::SinkResult<()> {
+    if self.inner.is_none() {
+      return Ok(());
+    }
+
+    // Avoid process exits in librespot when sink.stop() errors.
+    let _ = self.with_inner("stop", |sink| sink.stop());
+    self.inner = None;
     Ok(())
+  }
+
+  fn write(
+    &mut self,
+    packet: AudioPacket,
+    converter: &mut Converter,
+  ) -> audio_backend::SinkResult<()> {
+    self.with_inner("write", |sink| sink.write(packet, converter))
   }
 }
 
@@ -260,18 +354,9 @@ impl StreamingPlayer {
       session.clone(),
       mixer.get_soft_volume(),
       move || {
-        let result =
-          std::panic::catch_unwind(|| backend(requested_device.clone(), AudioFormat::default()));
-        match result {
-          Ok(sink) => sink,
-          Err(_) => {
-            eprintln!(
-              "Failed to initialize audio output backend; falling back to a null sink (no audio). \
-Set SPOTATUI_STREAMING_AUDIO_DEVICE to select an output device, or SPOTATUI_STREAMING_AUDIO_BACKEND to select a backend."
-            );
-            Box::new(NullSink)
-          }
-        }
+        Box::new(RecoveringSink::new(move || {
+          backend(requested_device.clone(), AudioFormat::default())
+        }))
       },
     );
 
