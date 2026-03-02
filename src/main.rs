@@ -33,6 +33,7 @@ mod tui;
 use crate::core::app::{self, ActiveBlock, App, RouteId};
 use crate::core::config::{ClientConfig, NCSPOT_CLIENT_ID};
 use crate::core::user_config::{UserConfig, UserConfigPaths};
+#[cfg(any(feature = "audio-viz", feature = "audio-viz-cpal"))]
 use crate::infra::audio;
 #[cfg(feature = "discord-rpc")]
 use crate::infra::discord_rpc;
@@ -873,6 +874,7 @@ of the app. Beware that this comes at a CPU cost!",
   }
 
   let mut spotify = None;
+  #[cfg(feature = "streaming")]
   let mut selected_redirect_uri = client_config.get_redirect_uri();
   let mut last_auth_error = None;
 
@@ -895,7 +897,10 @@ of the app. Beware that this comes at a CPU cost!",
           info!("Using fallback client ID {}", client_id);
         }
         client_config.client_id = client_id.clone();
-        selected_redirect_uri = redirect_uri;
+        #[cfg(feature = "streaming")]
+        {
+          selected_redirect_uri = redirect_uri;
+        }
         spotify = Some(candidate);
         break;
       }
