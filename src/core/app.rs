@@ -1090,7 +1090,7 @@ impl App {
 
     // Periodic party sync: host broadcasts state every ~2 seconds (~125 ticks at 16ms)
     // Keep this before early-return paths so sync still happens during native-streaming fast paths.
-    if self.party_status == PartyStatus::Hosting && self.animation_tick % 125 == 0 {
+    if self.party_status == PartyStatus::Hosting && self.animation_tick.is_multiple_of(125) {
       self.dispatch(IoEvent::SyncPlayback);
     }
 

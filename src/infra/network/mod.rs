@@ -798,11 +798,7 @@ impl Network {
     }
 
     // Position drift correction (>3s triggers seek)
-    let drift = if current_progress > compensated_position {
-      current_progress - compensated_position
-    } else {
-      compensated_position - current_progress
-    };
+    let drift = current_progress.abs_diff(compensated_position);
 
     if drift > 3000 && current_uri == track_uri {
       self.seek(compensated_position as u32).await;

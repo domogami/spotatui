@@ -7,17 +7,12 @@ use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream};
 
 type WsStream = tokio_tungstenite::WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>;
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ControlMode {
+  #[default]
   HostOnly,
   SharedControl,
-}
-
-impl Default for ControlMode {
-  fn default() -> Self {
-    ControlMode::HostOnly
-  }
 }
 
 impl std::fmt::Display for ControlMode {
@@ -85,18 +80,13 @@ pub enum PartyRole {
   Guest,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Default)]
 pub enum PartyStatus {
+  #[default]
   Disconnected,
   Connecting,
   Hosting,
   Joined,
-}
-
-impl Default for PartyStatus {
-  fn default() -> Self {
-    PartyStatus::Disconnected
-  }
 }
 
 impl std::fmt::Display for PartyStatus {
