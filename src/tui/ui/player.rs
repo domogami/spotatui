@@ -1,6 +1,6 @@
 use crate::core::app::{ActiveBlock, App};
 use ratatui::{
-  layout::{Alignment, Constraint, Direction, Layout, Rect},
+  layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
   style::{Color, Modifier, Style},
   text::{Line, Span, Text},
   widgets::{
@@ -17,6 +17,234 @@ use super::util::{
   create_artist_string, display_track_progress, get_color, get_track_progress_percentage,
   BASIC_VIEW_HEIGHT,
 };
+
+const PLAYBAR_CONTROLS: [PlaybarControl; 8] = [
+  PlaybarControl::Prev,
+  PlaybarControl::PlayPause,
+  PlaybarControl::Next,
+  PlaybarControl::Shuffle,
+  PlaybarControl::Repeat,
+  PlaybarControl::Like,
+  PlaybarControl::VolumeDown,
+  PlaybarControl::VolumeUp,
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum PlaybarControl {
+  Prev,
+  PlayPause,
+  Next,
+  Shuffle,
+  Repeat,
+  Like,
+  VolumeDown,
+  VolumeUp,
+}
+
+impl PlaybarControl {
+  const fn button_label(self) -> &'static str {
+    match self {
+      Self::Prev => "[Prev]",
+      Self::PlayPause => "[Play/Pause]",
+      Self::Next => "[Next]",
+      Self::Shuffle => "[Shuffle]",
+      Self::Repeat => "[Repeat]",
+      Self::Like => "[Like]",
+      Self::VolumeDown => "[Vol-]",
+      Self::VolumeUp => "[Vol+]",
+    }
+  }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PlaybarControlHitbox {
+  control: PlaybarControl,
+  rect: Rect,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PlaybarLayoutAreas {
+  artist_area: Rect,
+  controls_area: Rect,
+  progress_area: Rect,
+  #[cfg(feature = "cover-art")]
+  cover_art: Option<Rect>,
+}
+
+fn split_playbar_rows(area: Rect) -> (Rect, Rect, Rect) {
+  if area.width == 0 || area.height == 0 {
+    let empty = Rect::new(area.x, area.y, area.width, 0);
+    return (empty, empty, empty);
+  }
+
+  if area.height == 1 {
+    let empty = Rect::new(area.x, area.y, area.width, 0);
+    return (empty, area, empty);
+  }
+
+  if area.height == 2 {
+    let [controls_area, progress_area] = area.layout(&Layout::vertical([
+      Constraint::Length(1),
+      Constraint::Length(1),
+    ]));
+    let empty = Rect::new(area.x, area.y, area.width, 0);
+    return (empty, controls_area, progress_area);
+  }
+
+  let [artist_area, controls_area, progress_area] = area.layout(&Layout::vertical([
+    Constraint::Min(1),
+    Constraint::Length(1),
+    Constraint::Length(1),
+  ]));
+
+  (artist_area, controls_area, progress_area)
+}
+
+fn playbar_layout_areas(app: &App, layout_chunk: Rect) -> PlaybarLayoutAreas {
+  #[cfg(feature = "cover-art")]
+  {
+    // first create margins
+    let [other] = layout_chunk.layout(&Layout::horizontal([Constraint::Fill(1)]).margin(1));
+
+    let (other, cover_art) = if app
+      .user_config
+      .do_draw_cover_art(app.cover_art.full_image_support())
+    {
+      if app.cover_art.available() {
+        let height = other.height;
+        // we need to allocate a square portion of layout_chunk, but terminal characters aren't
+        // square!
+
+        // totally arbitrary
+        let ratio = 1.9;
+        // we ceil rather than simply casting for using the full height of the area
+        let width = ((height as f32) * ratio).ceil() as u16;
+        let [cover_art, _, other] = other.layout(&Layout::horizontal([
+          Constraint::Length(width),
+          Constraint::Length(1),
+          Constraint::Percentage(100),
+        ]));
+
+        (other, Some(cover_art))
+      } else {
+        (other, None)
+      }
+    } else {
+      (other, None)
+    };
+
+    let (artist_area, controls_area, progress_area) = split_playbar_rows(other);
+
+    return PlaybarLayoutAreas {
+      artist_area,
+      controls_area,
+      progress_area,
+      cover_art,
+    };
+  }
+
+  #[cfg(not(feature = "cover-art"))]
+  {
+    let _ = app;
+    let [inner] = layout_chunk.layout(&Layout::horizontal([Constraint::Fill(1)]).margin(1));
+    let (artist_area, controls_area, progress_area) = split_playbar_rows(inner);
+
+    PlaybarLayoutAreas {
+      artist_area,
+      controls_area,
+      progress_area,
+    }
+  }
+}
+
+fn playbar_control_hitboxes_in_area(controls_area: Rect) -> Vec<PlaybarControlHitbox> {
+  if controls_area.width == 0 || controls_area.height == 0 {
+    return Vec::new();
+  }
+
+  let mut required_width = 0u16;
+  for (idx, control) in PLAYBAR_CONTROLS.iter().enumerate() {
+    if idx > 0 {
+      required_width = required_width.saturating_add(1);
+    }
+    required_width = required_width.saturating_add(control.button_label().len() as u16);
+  }
+
+  let start_x = if controls_area.width > required_width {
+    controls_area
+      .x
+      .saturating_add((controls_area.width - required_width) / 2)
+  } else {
+    controls_area.x
+  };
+
+  let mut x = start_x;
+  let y = controls_area.y.saturating_add(controls_area.height / 2);
+  let right = controls_area.x.saturating_add(controls_area.width);
+  let mut hitboxes = Vec::with_capacity(PLAYBAR_CONTROLS.len());
+
+  for control in PLAYBAR_CONTROLS {
+    let width = control.button_label().len() as u16;
+    if x.saturating_add(width) > right {
+      break;
+    }
+    hitboxes.push(PlaybarControlHitbox {
+      control,
+      rect: Rect {
+        x,
+        y,
+        width,
+        height: 1,
+      },
+    });
+    x = x.saturating_add(width.saturating_add(1));
+  }
+
+  hitboxes
+}
+
+pub(crate) fn playbar_control_hitboxes(
+  app: &App,
+  playbar_area: Rect,
+) -> Vec<(PlaybarControl, Rect)> {
+  if app
+    .current_playback_context
+    .as_ref()
+    .and_then(|ctx| ctx.item.as_ref())
+    .is_none()
+  {
+    return Vec::new();
+  }
+
+  let controls_area = playbar_layout_areas(app, playbar_area).controls_area;
+  playbar_control_hitboxes_in_area(controls_area)
+    .into_iter()
+    .map(|hitbox| (hitbox.control, hitbox.rect))
+    .collect()
+}
+
+pub(crate) fn playbar_control_at(
+  app: &App,
+  playbar_area: Rect,
+  x: u16,
+  y: u16,
+) -> Option<PlaybarControl> {
+  playbar_control_hitboxes(app, playbar_area)
+    .into_iter()
+    .find_map(|(control, rect)| rect.contains(Position { x, y }).then_some(control))
+}
+
+fn draw_playbar_controls(f: &mut Frame<'_>, app: &App, playbar_area: Rect) {
+  let controls_style = Style::default().fg(app.user_config.theme.playbar_text);
+  for (control, rect) in playbar_control_hitboxes(app, playbar_area) {
+    debug_assert_eq!(
+      playbar_control_at(app, playbar_area, rect.x, rect.y),
+      Some(control)
+    );
+    let control = Paragraph::new(Span::styled(control.button_label(), controls_style));
+    f.render_widget(control, rect);
+  }
+}
 
 pub fn draw_basic_view(f: &mut Frame<'_>, app: &App) {
   let chunks = Layout::default()
@@ -131,56 +359,9 @@ fn draw_lyrics(f: &mut Frame<'_>, app: &App, area: Rect) {
 }
 
 pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
-  #[cfg(feature = "cover-art")]
-  let (artist_area, progress_area, cover_art) = {
-    // first create margins
-    let [other] = layout_chunk.layout(&Layout::horizontal([Constraint::Fill(1)]).margin(1));
-
-    let (other, cover_art) = if app
-      .user_config
-      .do_draw_cover_art(app.cover_art.full_image_support())
-    {
-      if app.cover_art.available() {
-        let height = other.height;
-        // we need to allocate a square portion of layout_chunk, but terminal characters aren't
-        // square!
-
-        // totally arbitrary
-        let ratio = 1.9;
-        // we ceil rather than simply casting for using the full height of the area
-        let width = ((height as f32) * ratio).ceil() as u16;
-        let [cover_art, _, other] = other.layout(&Layout::horizontal([
-          Constraint::Length(width),
-          Constraint::Length(1),
-          Constraint::Percentage(100),
-        ]));
-
-        (other, Some(cover_art))
-      } else {
-        (other, None)
-      }
-    } else {
-      (other, None)
-    };
-
-    let [artist_area, _, progress_area] = other.layout(&Layout::vertical([
-      Constraint::Percentage(50),
-      Constraint::Percentage(25),
-      Constraint::Percentage(25),
-    ]));
-
-    (artist_area, progress_area, cover_art)
-  };
-
-  #[cfg(not(feature = "cover-art"))]
-  let [artist_area, _, progress_area] = layout_chunk.layout(
-    &Layout::vertical([
-      Constraint::Percentage(50),
-      Constraint::Percentage(25),
-      Constraint::Percentage(25),
-    ])
-    .margin(1),
-  );
+  let playbar_areas = playbar_layout_areas(app, layout_chunk);
+  let artist_area = playbar_areas.artist_area;
+  let progress_area = playbar_areas.progress_area;
 
   let mut drew_playbar = false;
 
@@ -311,6 +492,7 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
           )),
         );
       f.render_widget(artist, artist_area);
+      draw_playbar_controls(f, app, layout_chunk);
 
       let progress_ms = match app.seek_ms {
         Some(seek_ms) => seek_ms,
@@ -381,7 +563,7 @@ pub fn draw_playbar(f: &mut Frame<'_>, app: &App, layout_chunk: Rect) {
         .user_config
         .do_draw_cover_art(app.cover_art.full_image_support())
       {
-        if let Some(cover_art) = cover_art {
+        if let Some(cover_art) = playbar_areas.cover_art {
           app.cover_art.render(f, cover_art);
         }
       }
@@ -470,4 +652,34 @@ pub fn draw_device_list(f: &mut Frame<'_>, app: &App) {
     )
     .highlight_symbol(Line::from("▶ ").style(Style::default().fg(app.user_config.theme.active)));
   f.render_stateful_widget(list, list_area, &mut state);
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn control_hitboxes_handle_zero_sized_area() {
+    assert!(playbar_control_hitboxes_in_area(Rect::new(0, 0, 0, 0)).is_empty());
+    assert!(playbar_control_hitboxes_in_area(Rect::new(0, 0, 10, 0)).is_empty());
+  }
+
+  #[test]
+  fn control_hitboxes_truncate_for_tiny_widths() {
+    let hitboxes = playbar_control_hitboxes_in_area(Rect::new(5, 10, 8, 1));
+    assert_eq!(hitboxes.len(), 1);
+    assert_eq!(hitboxes[0].control, PlaybarControl::Prev);
+    assert_eq!(hitboxes[0].rect, Rect::new(5, 10, 6, 1));
+  }
+
+  #[test]
+  fn control_hitboxes_include_all_controls_when_wide_enough() {
+    let hitboxes = playbar_control_hitboxes_in_area(Rect::new(0, 0, 200, 1));
+    assert_eq!(hitboxes.len(), PLAYBAR_CONTROLS.len());
+    assert_eq!(hitboxes[0].control, PlaybarControl::Prev);
+    assert_eq!(
+      hitboxes[PLAYBAR_CONTROLS.len() - 1].control,
+      PlaybarControl::VolumeUp
+    );
+  }
 }

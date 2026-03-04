@@ -2,6 +2,7 @@ use super::common_key_events;
 use crate::core::app::{ActiveBlock, App};
 use crate::infra::network::IoEvent;
 use crate::tui::event::Key;
+use crate::tui::ui::player::PlaybarControl;
 use rspotify::model::{context::CurrentPlaybackContext, PlayableId, PlayableItem};
 
 pub fn handler(key: Key, app: &mut App) {
@@ -10,30 +11,47 @@ pub fn handler(key: Key, app: &mut App) {
       app.set_current_route_state(Some(ActiveBlock::Empty), Some(ActiveBlock::MyPlaylists));
     }
     Key::Char('s') => {
-      if let Some(CurrentPlaybackContext {
-        item: Some(item), ..
-      }) = app.current_playback_context.to_owned()
-      {
-        match item {
-          PlayableItem::Track(track) => {
-            if let Some(track_id) = track.id {
-              app.dispatch(IoEvent::ToggleSaveTrack(PlayableId::Track(
-                track_id.into_static(),
-              )));
-            }
-          }
-          PlayableItem::Episode(episode) => {
-            app.dispatch(IoEvent::ToggleSaveTrack(PlayableId::Episode(
-              episode.id.into_static(),
-            )));
-          }
-        };
-      };
+      handle_control(PlaybarControl::Like, app);
     }
     Key::Char('w') => {
       add_currently_playing_track_to_playlist(app);
     }
     _ => {}
+  };
+}
+
+pub(crate) fn handle_control(control: PlaybarControl, app: &mut App) {
+  match control {
+    PlaybarControl::Prev => app.previous_track(),
+    PlaybarControl::PlayPause => app.toggle_playback(),
+    PlaybarControl::Next => app.next_track(),
+    PlaybarControl::Shuffle => app.shuffle(),
+    PlaybarControl::Repeat => app.repeat(),
+    PlaybarControl::Like => toggle_like_currently_playing_item(app),
+    PlaybarControl::VolumeDown => app.decrease_volume(),
+    PlaybarControl::VolumeUp => app.increase_volume(),
+  }
+}
+
+pub(crate) fn toggle_like_currently_playing_item(app: &mut App) {
+  if let Some(CurrentPlaybackContext {
+    item: Some(item), ..
+  }) = app.current_playback_context.to_owned()
+  {
+    match item {
+      PlayableItem::Track(track) => {
+        if let Some(track_id) = track.id {
+          app.dispatch(IoEvent::ToggleSaveTrack(PlayableId::Track(
+            track_id.into_static(),
+          )));
+        }
+      }
+      PlayableItem::Episode(episode) => {
+        app.dispatch(IoEvent::ToggleSaveTrack(PlayableId::Episode(
+          episode.id.into_static(),
+        )));
+      }
+    };
   };
 }
 

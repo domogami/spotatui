@@ -1,10 +1,11 @@
-use super::{library, playlist, settings, track_table};
+use super::{library, playbar, playlist, settings, track_table};
 use crate::core::app::{
   ActiveBlock, App, RouteId, SettingValue, SettingsCategory, LIBRARY_OPTIONS,
 };
 use crate::core::layout::{library_constraints, playbar_constraint, sidebar_constraints};
 use crate::tui::event::Key;
-use crate::tui::ui::util::{get_main_layout_margin, SMALL_TERMINAL_WIDTH};
+use crate::tui::ui::player::playbar_control_at;
+use crate::tui::ui::util::{get_main_layout_margin, BASIC_VIEW_HEIGHT, SMALL_TERMINAL_WIDTH};
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use ratatui::layout::{Constraint, Layout, Rect};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
@@ -16,12 +17,21 @@ const SETTINGS_UNSAVED_PROMPT_WIDTH: u16 = 58;
 const SETTINGS_UNSAVED_PROMPT_HEIGHT: u16 = 9;
 
 pub fn handler(mouse: MouseEvent, app: &mut App) {
-  if app.get_current_route().active_block == ActiveBlock::Settings {
+  let current_route = app.get_current_route();
+  let current_route_id = current_route.id.clone();
+  let current_active_block = current_route.active_block;
+
+  if current_active_block == ActiveBlock::Settings {
     handle_settings_screen_mouse(mouse, app);
     return;
   }
 
-  if !is_main_layout_mouse_interactive(app.get_current_route().active_block) {
+  if current_route_id == RouteId::BasicView {
+    handle_basic_view_mouse(mouse, app);
+    return;
+  }
+
+  if !is_main_layout_mouse_interactive(current_active_block) {
     return;
   }
 
@@ -50,6 +60,11 @@ pub fn handler(mouse: MouseEvent, app: &mut App) {
     }
   }
 
+  if rect_contains(areas.playbar, mouse.column, mouse.row) {
+    handle_playbar_mouse(mouse, areas.playbar, ActiveBlock::PlayBar, app);
+    return;
+  }
+
   if rect_contains(areas.library, mouse.column, mouse.row) {
     handle_library_mouse(mouse, areas.library, app);
     return;
@@ -60,7 +75,7 @@ pub fn handler(mouse: MouseEvent, app: &mut App) {
     return;
   }
 
-  if app.get_current_route().id == RouteId::TrackTable
+  if current_route_id == RouteId::TrackTable
     && rect_contains(areas.content, mouse.column, mouse.row)
   {
     handle_song_table_mouse(mouse, areas.content, app);
@@ -145,6 +160,34 @@ fn handle_settings_mouse(mouse: MouseEvent, app: &mut App) {
     app.load_settings_for_category();
     app.push_navigation_stack(RouteId::Settings, ActiveBlock::Settings);
   }
+}
+
+fn handle_basic_view_mouse(mouse: MouseEvent, app: &mut App) {
+  let Some(playbar_area) = basic_view_playbar_area(app) else {
+    return;
+  };
+
+  if rect_contains(playbar_area, mouse.column, mouse.row) {
+    handle_playbar_mouse(mouse, playbar_area, ActiveBlock::BasicView, app);
+  }
+}
+
+fn handle_playbar_mouse(
+  mouse: MouseEvent,
+  playbar_area: Rect,
+  focus_block: ActiveBlock,
+  app: &mut App,
+) {
+  if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+    return;
+  }
+
+  let Some(control) = playbar_control_at(app, playbar_area, mouse.column, mouse.row) else {
+    return;
+  };
+
+  focus_playbar(focus_block, app);
+  playbar::handle_control(control, app);
 }
 
 fn handle_settings_screen_mouse(mouse: MouseEvent, app: &mut App) {
@@ -318,6 +361,10 @@ fn focus_library(app: &mut App) {
 
 fn focus_song_table(app: &mut App) {
   app.set_current_route_state(Some(ActiveBlock::TrackTable), Some(ActiveBlock::TrackTable));
+}
+
+fn focus_playbar(block: ActiveBlock, app: &mut App) {
+  app.set_current_route_state(Some(block), Some(block));
 }
 
 fn focus_input(app: &mut App) {
@@ -573,6 +620,7 @@ struct MainLayoutAreas {
   input: Option<Rect>,
   help: Option<Rect>,
   settings: Option<Rect>,
+  playbar: Rect,
   library: Rect,
   playlists: Rect,
   content: Rect,
@@ -647,6 +695,20 @@ fn settings_unsaved_prompt_areas(app: &App) -> Option<SettingsUnsavedPromptAreas
   })
 }
 
+fn basic_view_playbar_area(app: &App) -> Option<Rect> {
+  if app.size.width == 0 || app.size.height == 0 {
+    return None;
+  }
+
+  let root = Rect::new(0, 0, app.size.width, app.size.height);
+  let [_lyrics_area, playbar_area] = root.layout(&Layout::vertical([
+    Constraint::Min(0),
+    Constraint::Length(BASIC_VIEW_HEIGHT),
+  ]));
+
+  Some(playbar_area)
+}
+
 fn main_layout_areas(app: &App) -> Option<MainLayoutAreas> {
   if app.size.width == 0 || app.size.height == 0 {
     return None;
@@ -662,12 +724,12 @@ fn main_layout_areas(app: &App) -> Option<MainLayoutAreas> {
   let sidebar = sidebar_constraints(behavior);
   let library = library_constraints(behavior);
 
-  let routes_area = if wide_layout {
-    let [routes_area, _playbar_area] =
+  let (routes_area, playbar_area) = if wide_layout {
+    let [routes_area, playbar_area] =
       root.layout(&Layout::vertical([Constraint::Min(1), playbar]).margin(margin));
-    routes_area
+    (routes_area, playbar_area)
   } else {
-    let [input_area, routes_area, _playbar_area] = root.layout(
+    let [input_area, routes_area, playbar_area] = root.layout(
       &Layout::vertical([Constraint::Length(3), Constraint::Min(1), playbar]).margin(margin),
     );
     let [input_text_area, help_area, settings_area] =
@@ -682,6 +744,7 @@ fn main_layout_areas(app: &App) -> Option<MainLayoutAreas> {
       input: Some(input_text_area),
       help: Some(help_area),
       settings: Some(settings_area),
+      playbar: playbar_area,
       library: library_area,
       playlists: playlist_area,
       content: content_area,
@@ -702,6 +765,7 @@ fn main_layout_areas(app: &App) -> Option<MainLayoutAreas> {
       input: Some(input_text_area),
       help: Some(help_area),
       settings: Some(settings_area),
+      playbar: playbar_area,
       library: library_area,
       playlists: playlist_area,
       content: content_area,
@@ -713,6 +777,7 @@ fn main_layout_areas(app: &App) -> Option<MainLayoutAreas> {
       input: None,
       help: None,
       settings: None,
+      playbar: playbar_area,
       library: library_area,
       playlists: playlist_area,
       content: content_area,
@@ -766,8 +831,16 @@ fn rect_contains(rect: Rect, x: u16, y: u16) -> bool {
 mod tests {
   use super::*;
   use crate::core::app::{PlaylistFolderItem, RouteId, SettingValue, SettingsCategory};
+  use crate::tui::ui::player::PlaybarControl;
+  use chrono::{Duration, Utc};
   use crossterm::event::{KeyModifiers, MouseEvent};
   use ratatui::layout::Size;
+  use rspotify::model::context::{Actions, CurrentPlaybackContext};
+  use rspotify::model::enums::{DeviceType, RepeatState};
+  use rspotify::model::{
+    CurrentlyPlayingType, Device, FullTrack, PlayableItem, SimplifiedAlbum, SimplifiedArtist,
+  };
+  use std::collections::HashMap;
 
   fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> MouseEvent {
     MouseEvent {
@@ -799,6 +872,90 @@ mod tests {
     app.settings_category = SettingsCategory::Behavior;
     app.load_settings_for_category();
     app.push_navigation_stack(RouteId::Settings, ActiveBlock::Settings);
+  }
+
+  fn with_playbar_context(app: &mut App) {
+    let item = PlayableItem::Track(FullTrack {
+      album: SimplifiedAlbum {
+        name: "Test Album".to_string(),
+        ..Default::default()
+      },
+      artists: vec![SimplifiedArtist {
+        name: "Test Artist".to_string(),
+        ..Default::default()
+      }],
+      available_markets: Vec::new(),
+      disc_number: 1,
+      duration: Duration::milliseconds(180_000),
+      explicit: false,
+      external_ids: HashMap::new(),
+      external_urls: HashMap::new(),
+      href: None,
+      id: None,
+      is_local: false,
+      is_playable: Some(true),
+      linked_from: None,
+      restrictions: None,
+      name: "Test Track".to_string(),
+      popularity: 50,
+      preview_url: None,
+      track_number: 1,
+    });
+
+    app.current_playback_context = Some(CurrentPlaybackContext {
+      device: Device {
+        id: Some("device-1".to_string()),
+        is_active: true,
+        is_private_session: false,
+        is_restricted: false,
+        name: "Desk Speaker".to_string(),
+        _type: DeviceType::Computer,
+        volume_percent: Some(42),
+      },
+      repeat_state: RepeatState::Off,
+      shuffle_state: false,
+      context: None,
+      timestamp: Utc::now(),
+      progress: None,
+      is_playing: false,
+      item: Some(item),
+      currently_playing_type: CurrentlyPlayingType::Track,
+      actions: Actions::default(),
+    });
+  }
+
+  fn find_playbar_control_click(
+    app: &App,
+    playbar_area: Rect,
+    target: PlaybarControl,
+  ) -> (u16, u16) {
+    let max_x = playbar_area.x.saturating_add(playbar_area.width);
+    let max_y = playbar_area.y.saturating_add(playbar_area.height);
+
+    for y in playbar_area.y..max_y {
+      for x in playbar_area.x..max_x {
+        if playbar_control_at(app, playbar_area, x, y) == Some(target) {
+          return (x, y);
+        }
+      }
+    }
+
+    panic!("expected to find click point for {:?}", target);
+  }
+
+  fn find_non_control_playbar_click(app: &App, playbar_area: Rect) -> (u16, u16) {
+    let max_x = playbar_area.x.saturating_add(playbar_area.width);
+    let max_y = playbar_area.y.saturating_add(playbar_area.height);
+
+    for y in playbar_area.y..max_y {
+      for x in playbar_area.x..max_x {
+        if playbar_control_at(app, playbar_area, x, y).is_none() {
+          return (x, y);
+        }
+      }
+    }
+
+    panic!("expected to find non-control click point in playbar");
   }
 
   #[test]
@@ -879,6 +1036,131 @@ mod tests {
     assert_eq!(route.id, RouteId::Settings);
     assert_eq!(route.active_block, ActiveBlock::Settings);
     assert!(!app.settings_items.is_empty());
+  }
+
+  #[test]
+  fn click_main_layout_playbar_control_triggers_action() {
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.push_navigation_stack(RouteId::Home, ActiveBlock::Home);
+    with_playbar_context(&mut app);
+
+    let areas = main_layout_areas(&app).expect("layout areas");
+    let (x, y) = find_playbar_control_click(&app, areas.playbar, PlaybarControl::PlayPause);
+    assert!(!app.is_loading);
+
+    handler(
+      mouse_event(MouseEventKind::Down(MouseButton::Left), x, y),
+      &mut app,
+    );
+
+    assert!(app.is_loading);
+    let route = app.get_current_route();
+    assert_eq!(route.active_block, ActiveBlock::PlayBar);
+    assert_eq!(route.hovered_block, ActiveBlock::PlayBar);
+  }
+
+  #[test]
+  fn click_basic_view_playbar_control_triggers_action() {
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.push_navigation_stack(RouteId::BasicView, ActiveBlock::BasicView);
+    with_playbar_context(&mut app);
+
+    let playbar_area = basic_view_playbar_area(&app).expect("basic view playbar area");
+    let (x, y) = find_playbar_control_click(&app, playbar_area, PlaybarControl::PlayPause);
+    assert!(!app.is_loading);
+
+    handler(
+      mouse_event(MouseEventKind::Down(MouseButton::Left), x, y),
+      &mut app,
+    );
+
+    assert!(app.is_loading);
+    let route = app.get_current_route();
+    assert_eq!(route.id, RouteId::BasicView);
+    assert_eq!(route.active_block, ActiveBlock::BasicView);
+    assert_eq!(route.hovered_block, ActiveBlock::BasicView);
+  }
+
+  #[test]
+  fn resized_playbar_control_click_still_maps_correctly() {
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.user_config.behavior.playbar_height_rows = 8;
+    app.push_navigation_stack(RouteId::Home, ActiveBlock::Home);
+    with_playbar_context(&mut app);
+
+    let areas = main_layout_areas(&app).expect("layout areas");
+    assert_eq!(areas.playbar.height, 8);
+    let (x, y) = find_playbar_control_click(&app, areas.playbar, PlaybarControl::PlayPause);
+
+    handler(
+      mouse_event(MouseEventKind::Down(MouseButton::Left), x, y),
+      &mut app,
+    );
+
+    assert!(app.is_loading);
+    assert_eq!(app.get_current_route().active_block, ActiveBlock::PlayBar);
+  }
+
+  #[test]
+  fn smaller_resized_playbar_control_click_still_maps_correctly() {
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.user_config.behavior.playbar_height_rows = 3;
+    app.push_navigation_stack(RouteId::Home, ActiveBlock::Home);
+    with_playbar_context(&mut app);
+
+    let areas = main_layout_areas(&app).expect("layout areas");
+    assert_eq!(areas.playbar.height, 3);
+    let (x, y) = find_playbar_control_click(&app, areas.playbar, PlaybarControl::PlayPause);
+
+    handler(
+      mouse_event(MouseEventKind::Down(MouseButton::Left), x, y),
+      &mut app,
+    );
+
+    assert!(app.is_loading);
+    assert_eq!(app.get_current_route().active_block, ActiveBlock::PlayBar);
+  }
+
+  #[test]
+  fn click_playbar_outside_controls_does_nothing() {
+    let mut app = App::default();
+    app.size = Size {
+      width: 160,
+      height: 50,
+    };
+    app.push_navigation_stack(RouteId::Home, ActiveBlock::Home);
+    with_playbar_context(&mut app);
+
+    let areas = main_layout_areas(&app).expect("layout areas");
+    let (x, y) = find_non_control_playbar_click(&app, areas.playbar);
+    let initial_active = app.get_current_route().active_block;
+    let initial_hovered = app.get_current_route().hovered_block;
+
+    handler(
+      mouse_event(MouseEventKind::Down(MouseButton::Left), x, y),
+      &mut app,
+    );
+
+    assert!(!app.is_loading);
+    let route = app.get_current_route();
+    assert_eq!(route.active_block, initial_active);
+    assert_eq!(route.hovered_block, initial_hovered);
   }
 
   #[test]
